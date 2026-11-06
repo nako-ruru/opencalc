@@ -2183,20 +2183,79 @@ export function rangeRect(a1) {
 ///
 /// `window.opencalcEditor` is unreachable from a parent frame that does not
 /// share this origin, so the host gets geometry and selection over
-/// `postMessage` instead. It is read-only: nothing here edits a cell.
+/// `postMessage` instead. The only edit it can make is inserting a chart over a
+/// range — the host's "make a picture of this" button — and that goes through
+/// the same `session_create_chart` the Insert menu uses, so the result is a
+/// native, editable chart rather than a picture of one.
 function installHostBridge() {
   const parent = window.parent;
   if (!parent || parent === window) return;
   const post = (message) => {
     try { parent.postMessage(message, "*"); } catch {}
   };
+  /// Where a chart was last painted, in iframe viewport CSS pixels.
+  const chartRect = (index) => {
+    const f = chartFrames.find((x) => x.index === index);
+    if (!f) return null;
+    const box = canvas.getBoundingClientRect();
+    const z = state.zoom || 1;
+    return { x: box.left + f.x * z, y: box.top + f.y * z, w: f.w * z, h: f.h * z };
+  };
   window.addEventListener("message", (event) => {
     if (event.source !== parent) return;
     const data = event.data;
-    if (!data || data.type !== "opencalc:rangeRect") return;
-    let rect = null;
-    try { rect = rangeRect(data.a1); } catch {}
-    post({ type: "opencalc:rangeRectResult", id: data.id, rect });
+    if (!data) return;
+    if (data.type === "opencalc:rangeRect") {
+      let rect = null;
+      try { rect = rangeRect(data.a1); } catch {}
+      post({ type: "opencalc:rangeRectResult", id: data.id, rect });
+      return;
+    }
+    if (data.type !== "opencalc:createChart") return;
+    const result = {
+      type: "opencalc:createChartResult",
+      id: data.id,
+      ok: false,
+      index: -1,
+      error: "",
+      rect: null,
+    };
+    try {
+      let r = parseNameRange(String(data.a1 || "").trim());
+      if (!r) throw new Error("bad range: " + data.a1);
+      // A single cell means "the block around it", the way Insert ▸ Chart
+      // reads it, so the host can pass the active cell and still get a chart
+      // of the table rather than of one cell.
+      if (r.r0 === r.r1 && r.c0 === r.c1) {
+        try {
+          const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
+          if (blk) r = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
+        } catch { /* keep the selection */ }
+      }
+      const index = wasm.session_create_chart(
+        state.sheet, r.r0, r.c0, r.r1, r.c1, String(data.kind || "column"));
+      invalidateGrowth();
+      // The chart lands two columns right of the data, which is often just off
+      // screen; scroll it in before measuring so the host gets a real box.
+      // The whole frame when it fits the pane, its left edge otherwise — the
+      // right edge of a chart wider than the pane would hide the axis labels
+      // the picture starts with.
+      const first = r.c1 + 2, last = r.c1 + 9;
+      // Body width, not canvas width: the row header covers the left 32px, and
+      // a chart that "fits" only by that margin would lose its axis under it.
+      const bodyX0 = (state.freeze || { bodyX0: HW }).bodyX0;
+      const viewW = wrap.getBoundingClientRect().width / (state.zoom || 1) - bodyX0;
+      const chartW = fscreenXEnd(last) - fscreenX(first);
+      ensureVisible(r.r0, chartW <= viewW ? last : first);
+      draw();
+      result.ok = true;
+      result.index = index;
+      result.rect = chartRect(index);
+      result.range = r;
+    } catch (e) {
+      result.error = String((e && e.message) || e);
+    }
+    post(result);
   });
   on("selectionChanged", (event) => {
     post({

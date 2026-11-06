@@ -2337,6 +2337,82 @@ function installHostBridge() {
       post(result);
       return;
     }
+    if (data.type === "opencalc:addFormat") {
+      const result = {
+        type: "opencalc:addFormatResult",
+        id: data.id,
+        ok: false,
+        applied: 0,
+        error: "",
+        range: null,
+      };
+      try {
+        const r = expandRange(data.a1);
+        if (!r) throw new Error("bad range: " + data.a1);
+        const rules = (Array.isArray(data.rules) ? data.rules : []).slice(0, 3);
+        if (!rules.length) throw new Error("no rules");
+        // A rule naming a column applies to that column's data rows only: a
+        // "data bar on Sales" that painted every column, header included, is
+        // not what the suggestion said.
+        const names = JSON.parse(wasm.session_pivot_fields_for(
+          state.sheet, r.r0, r.c0, r.r1, r.c1));
+        let applied = 0;
+        try {
+          for (const rule of rules) {
+            let rr0 = r.r0, cc0 = r.c0, rr1 = r.r1, cc1 = r.c1;
+            const field = String(rule.field || "").trim();
+            if (field) {
+              const at = names.indexOf(field);
+              if (at < 0) throw new Error("no such field: " + field);
+              cc0 = cc1 = r.c0 + at;
+              // The header row names the field; it is not one of the values
+              // the rule is about.
+              rr0 = Math.min(r.r0 + 1, r.r1);
+            }
+            wasm.session_add_cf(
+              state.sheet, rr0, cc0, rr1, cc1,
+              String(rule.kind || ""),
+              Number(rule.a) || 0,
+              Number(rule.b) || 0,
+              String(rule.text || ""),
+              String(rule.fill || ""),
+            );
+            applied++;
+          }
+        } catch (e) {
+          // Leave the sheet as it was: a half-applied suggestion is a state
+          // nobody asked for and nobody can read off the grid.
+          for (let i = 0; i < applied; i++) {
+            try { wasm.session_undo(); } catch {}
+          }
+          throw e;
+        }
+        invalidateGrowth();
+        draw();
+        result.ok = true;
+        result.applied = applied;
+        result.range = r;
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
+      return;
+    }
+    if (data.type === "opencalc:clearFormat") {
+      const result = { type: "opencalc:clearFormatResult", id: data.id, ok: false, error: "" };
+      try {
+        const r = expandRange(data.a1);
+        if (!r) throw new Error("bad range: " + data.a1);
+        wasm.session_clear_cf(state.sheet, r.r0, r.c0, r.r1, r.c1);
+        invalidateGrowth();
+        draw();
+        result.ok = true;
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
+      return;
+    }
     if (data.type !== "opencalc:createChart") return;
     const result = {
       type: "opencalc:createChartResult",

@@ -2193,6 +2193,21 @@ function installHostBridge() {
   const post = (message) => {
     try { parent.postMessage(message, "*"); } catch {}
   };
+  /// The range a chart would be built over: the selection, or the block around
+  /// a single cell — the way Insert ▸ Chart reads it. Shared by the insert and
+  /// by the host's "recommend a chart" button, so the model is shown exactly
+  /// the data the chart will plot.
+  const expandRange = (a1) => {
+    let r = parseNameRange(String(a1 || "").trim());
+    if (!r) return null;
+    if (r.r0 === r.r1 && r.c0 === r.c1) {
+      try {
+        const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
+        if (blk) r = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
+      } catch { /* keep the selection */ }
+    }
+    return r;
+  };
   /// Where a chart was last painted, in iframe viewport CSS pixels.
   const chartRect = (index) => {
     const f = chartFrames.find((x) => x.index === index);
@@ -2211,6 +2226,12 @@ function installHostBridge() {
       post({ type: "opencalc:rangeRectResult", id: data.id, rect });
       return;
     }
+    if (data.type === "opencalc:expandRange") {
+      let range = null;
+      try { range = expandRange(data.a1); } catch {}
+      post({ type: "opencalc:expandRangeResult", id: data.id, range });
+      return;
+    }
     if (data.type !== "opencalc:createChart") return;
     const result = {
       type: "opencalc:createChartResult",
@@ -2221,17 +2242,8 @@ function installHostBridge() {
       rect: null,
     };
     try {
-      let r = parseNameRange(String(data.a1 || "").trim());
+      const r = expandRange(data.a1);
       if (!r) throw new Error("bad range: " + data.a1);
-      // A single cell means "the block around it", the way Insert ▸ Chart
-      // reads it, so the host can pass the active cell and still get a chart
-      // of the table rather than of one cell.
-      if (r.r0 === r.r1 && r.c0 === r.c1) {
-        try {
-          const blk = JSON.parse(wasm.session_block_bounds(state.sheet, r.r0, r.c0));
-          if (blk) r = { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 };
-        } catch { /* keep the selection */ }
-      }
       const index = wasm.session_create_chart(
         state.sheet, r.r0, r.c0, r.r1, r.c1, String(data.kind || "column"));
       invalidateGrowth();

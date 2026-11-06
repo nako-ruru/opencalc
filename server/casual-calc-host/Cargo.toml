@@ -11,7 +11,9 @@ publish = false
 casual-calc-secrets = { path = "../casual-calc-secrets" }
 casual-calc-export = { path = "../../crates/casual-calc-export" }
 casual-calc-import = { path = "../../crates/casual-calc-import" }
+casual-calc-io = { path = "../../crates/casual-calc-io" }
 casual-calc-model = { path = "../../crates/casual-calc-model" }
+casual-calc-ods = { path = "../../crates/casual-calc-ods" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }

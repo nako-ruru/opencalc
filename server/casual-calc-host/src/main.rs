@@ -603,14 +603,77 @@ async fn upload(State(config): State<Arc<Config>>, mut form: Multipart) -> impl 
     // and the person who uploaded it finds out one navigation later, with no
     // way to tell a corrupt file from a broken server. The importer is the only
     // thing that actually knows, so it is what decides.
-    if let Err(why) = casual_calc_import::import_package(bytes.clone()) {
-        tracing::info!(%title, ?why, "upload refused");
-        return (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("this file could not be opened as a spreadsheet: {why}"),
-        )
-            .into_response();
-    }
+    //
+    // ODS and CSV are converted here, at the edge, so the rest of the host and
+    // the editor keep one format: an `.ods` or `.csv` upload becomes an OOXML
+    // document rather than a second code path through every layer. The
+    // conversion is the engine's own importer, which is the only thing that
+    // actually knows whether the bytes are a spreadsheet.
+    // The package importer is tried first, not `detect`: `detect` identifies
+    // by the *first* zip entry, and a valid OOXML file that puts something
+    // else first would be refused by it while importing perfectly well.
+    let bytes = if casual_calc_import::import_package(bytes.clone()).is_ok() {
+        bytes
+    } else {
+        match casual_calc_io::detect(&bytes) {
+            Some(casual_calc_io::Detected::Ods) => {
+            let workbook = match casual_calc_ods::import_ods(&bytes) {
+                Ok((workbook, _)) => workbook,
+                Err(why) => {
+                    tracing::info!(%title, ?why, "ods upload refused");
+                    return (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        format!("this .ods could not be opened: {why}"),
+                    )
+                        .into_response();
+                }
+            };
+            match casual_calc_export::write_workbook(&workbook) {
+                Ok(converted) => converted,
+                Err(why) => {
+                    tracing::error!(%title, ?why, "ods conversion failed");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not convert the .ods",
+                    )
+                        .into_response();
+                }
+            }
+        }
+        Some(casual_calc_io::Detected::Delimited(delimiter)) => {
+            let workbook = match casual_calc_io::read_delimited(&bytes, delimiter) {
+                Ok(workbook) => workbook,
+                Err(why) => {
+                    tracing::info!(%title, ?why, "csv upload refused");
+                    return (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        format!("this .csv could not be opened: {why}"),
+                    )
+                        .into_response();
+                }
+            };
+            match casual_calc_export::write_workbook(&workbook) {
+                Ok(converted) => converted,
+                Err(why) => {
+                    tracing::error!(%title, ?why, "csv conversion failed");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not convert the .csv",
+                    )
+                        .into_response();
+                }
+            }
+        }
+            _ => {
+                tracing::info!(%title, "upload refused: not a spreadsheet");
+                return (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "this file could not be opened as a spreadsheet",
+                )
+                    .into_response();
+            }
+        }
+    };
 
     let id = uuid()[..16].to_owned();
     let meta = DocumentMeta {

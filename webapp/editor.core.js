@@ -2136,6 +2136,78 @@ export function rebuildGrowth() {
 // line itself is drawn, else the start of the following line.
 export const fscreenXEnd = (col) => (colXAt(col) !== undefined ? colXAt(col) + colWAt(col) : fscreenX(col + 1));
 export const fscreenYEnd = (row) => (rowYAt(row) !== undefined ? rowYAt(row) + rowHAt(row) : fscreenY(row + 1));
+
+/// The viewport box of an A1 reference, in CSS pixels (`{x, y, w, h}`).
+///
+/// A host needs this to put a popover next to a cell without reimplementing
+/// the grid's scroll, zoom and frozen-pane arithmetic. `null` means the
+/// reference is invalid, names another sheet, or lies entirely outside the
+/// visible pane. The box is clamped to the pane, so a cell scrolled under the
+/// frozen band never puts a popover over the headers.
+export function rangeRect(a1) {
+  let text = String(a1 || "").trim();
+  const bang = text.lastIndexOf("!");
+  if (bang >= 0) {
+    let name = text.slice(0, bang).trim();
+    text = text.slice(bang + 1).trim();
+    if (name.startsWith("'") && name.endsWith("'")) {
+      name = name.slice(1, -1).replaceAll("''", "'");
+    }
+    if (name !== sheetNameAt(state.sheet)) return null;
+  }
+  const r = parseNameRange(text);
+  if (!r) return null;
+  const x = colXAt(r.c0) ?? fscreenX(r.c0);
+  const y = rowYAt(r.r0) ?? fscreenY(r.r0);
+  const x1 = fscreenXEnd(r.c1);
+  const y1 = fscreenYEnd(r.r1);
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  const rect = wrap.getBoundingClientRect();
+  const z = state.zoom || 1;
+  const loX = r.c0 < f.fc ? HW : f.bodyX0;
+  const hiX = r.c1 < f.fc ? f.bodyX0 : rect.width / z;
+  const loY = r.r0 < f.fr ? HH : f.bodyY0;
+  const hiY = r.r1 < f.fr ? f.bodyY0 : rect.height / z;
+  const left = Math.max(loX, x), top = Math.max(loY, y);
+  const right = Math.min(hiX, x1), bottom = Math.min(hiY, y1);
+  if (right <= left || bottom <= top) return null;
+  return {
+    x: rect.left + left * z,
+    y: rect.top + top * z,
+    w: (right - left) * z,
+    h: (bottom - top) * z,
+  };
+}
+
+/// A narrow iframe bridge for hosts on another origin.
+///
+/// `window.opencalcEditor` is unreachable from a parent frame that does not
+/// share this origin, so the host gets geometry and selection over
+/// `postMessage` instead. It is read-only: nothing here edits a cell.
+function installHostBridge() {
+  const parent = window.parent;
+  if (!parent || parent === window) return;
+  const post = (message) => {
+    try { parent.postMessage(message, "*"); } catch {}
+  };
+  window.addEventListener("message", (event) => {
+    if (event.source !== parent) return;
+    const data = event.data;
+    if (!data || data.type !== "opencalc:rangeRect") return;
+    let rect = null;
+    try { rect = rangeRect(data.a1); } catch {}
+    post({ type: "opencalc:rangeRectResult", id: data.id, rect });
+  });
+  on("selectionChanged", (event) => {
+    post({
+      type: "opencalc:selectionChanged",
+      sheet: event.sheet,
+      range: event.range,
+      activeCell: event.activeCell,
+    });
+  });
+  post({ type: "opencalc:ready", build: BUILD });
+}
 // The merge covering (row,col), if any.
 // Whether a merge intersects the current (effective) selection.
 
@@ -11961,6 +12033,7 @@ async function main() {
   // module cache rather than building a second one.
   if (typeof window !== "undefined") {
     try { window.opencalcEditor = await import(import.meta.url); } catch {}
+    try { installHostBridge(); } catch {}
   }
 
   // Faces the deployment supplies, registered before anything can be rendered

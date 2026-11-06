@@ -2208,6 +2208,27 @@ function installHostBridge() {
     }
     return r;
   };
+  /// The source fields of a range, as the pivot panel would list them.
+  ///
+  /// `numeric` is what the host's "make a pivot of this" suggestion needs: a
+  /// field nothing can be summed over is a poor candidate for Values, and
+  /// guessing wrong there is a report of zeros.
+  const pivotFields = (r) => {
+    let names = [];
+    try {
+      names = JSON.parse(
+        wasm.session_pivot_fields_for(state.sheet, r.r0, r.c0, r.r1, r.c1));
+    } catch { /* an unreadable range lists nothing */ }
+    return names.map((name, index) => {
+      let numeric = false;
+      try {
+        const stats = JSON.parse(wasm.session_range_stats(
+          state.sheet, Math.min(r.r0 + 1, r.r1), r.c0 + index, r.r1, r.c0 + index));
+        numeric = (stats.numeric || 0) > 0;
+      } catch { /* treat as text */ }
+      return { index, name: name || `Column${index + 1}`, numeric };
+    });
+  };
   /// Where a chart was last painted, in iframe viewport CSS pixels.
   const chartRect = (index) => {
     const f = chartFrames.find((x) => x.index === index);
@@ -2230,6 +2251,90 @@ function installHostBridge() {
       let range = null;
       try { range = expandRange(data.a1); } catch {}
       post({ type: "opencalc:expandRangeResult", id: data.id, range });
+      return;
+    }
+    if (data.type === "opencalc:pivotFields") {
+      const result = { type: "opencalc:pivotFieldsResult", id: data.id, ok: false, fields: [], error: "" };
+      try {
+        const r = expandRange(data.a1);
+        if (!r) throw new Error("bad range: " + data.a1);
+        result.fields = pivotFields(r);
+        result.range = r;
+        result.ok = true;
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
+      return;
+    }
+    if (data.type === "opencalc:createPivot") {
+      const result = {
+        type: "opencalc:createPivotResult",
+        id: data.id,
+        ok: false,
+        index: -1,
+        sheet: -1,
+        sheetName: "",
+        error: "",
+      };
+      try {
+        const r = expandRange(data.a1);
+        if (!r) throw new Error("bad range: " + data.a1);
+        // A pivot needs a header row and at least one row under it; anything
+        // less is a report of one cell, which the panel could not build either.
+        if (r.r1 <= r.r0) {
+          throw new Error("select a table with a header row and at least one data row");
+        }
+        const names = JSON.parse(wasm.session_pivot_fields_for(
+          state.sheet, r.r0, r.c0, r.r1, r.c1));
+        const at = (name) => {
+          const i = names.indexOf(String(name));
+          if (i < 0) throw new Error("no such field: " + name);
+          return i;
+        };
+        // Everything is resolved before the sheet is added: a spec naming a
+        // field the data does not have must not leave an empty tab behind.
+        const rows = (data.rows || []).map((n) => ({ field: at(n), sort: "ascending", subtotal: true }));
+        const cols = (data.cols || []).map((n) => ({ field: at(n), sort: "ascending", subtotal: true }));
+        const values = (data.values || []).map((v) => ({
+          field: at(v.field),
+          aggregate: String(v.aggregate || "sum"),
+          name: "",
+          numberFormat: "",
+        }));
+        const filters = (data.filters || []).map((f) => ({
+          field: at(f.field),
+          selected: (f.selected || []).map(String),
+        }));
+        if (!values.length) throw new Error("a pivot needs at least one value field");
+
+        const source = state.sheet;
+        // Excel's own default destination, and the only one that cannot land
+        // on something already on the grid.
+        const dest = wasm.session_add_sheet();
+        const index = wasm.session_create_pivot(
+          source, r.r0, r.c0, r.r1, r.c1, dest, 0, 0, "");
+        // Read the wire back rather than rebuilding it: the engine owns the
+        // source rectangle, the anchor and the header names, and a second copy
+        // of that arithmetic is a second thing to keep in step.
+        const def = JSON.parse(wasm.session_pivots(dest))[index];
+        def.rows = rows;
+        def.cols = cols;
+        def.values = values;
+        def.filters = filters;
+        wasm.session_set_pivot(dest, index, JSON.stringify(def));
+        renderTabs();
+        switchSheet(dest);
+        invalidateGrowth();
+        draw();
+        result.ok = true;
+        result.index = index;
+        result.sheet = dest;
+        result.sheetName = sheetNameAt(dest);
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
       return;
     }
     if (data.type !== "opencalc:createChart") return;

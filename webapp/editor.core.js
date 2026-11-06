@@ -2253,6 +2253,20 @@ function installHostBridge() {
       post({ type: "opencalc:expandRangeResult", id: data.id, range });
       return;
     }
+    if (data.type === "opencalc:selectRange") {
+      // The host's chip sends the user back to the range it names. Moving the
+      // view and the selection together is the whole point: a chip that only
+      // scrolled would leave the next keystroke somewhere else.
+      let r = null;
+      try { r = parseNameRange(String(data.a1 || "").trim()); } catch {}
+      if (!r) return;
+      state.anchor = { row: r.r0, col: r.c0 };
+      state.sel = { row: r.r1, col: r.c1 };
+      state.selKind = "cells";
+      ensureVisible(r.r0, r.c0);
+      draw();
+      return;
+    }
     if (data.type === "opencalc:errorAnswer") {
       if (!errorActionsData || data.id !== errorActionsData.req) return;
       errorActionsBusy = false;
@@ -2548,6 +2562,7 @@ function installHostBridge() {
     post({
       type: "opencalc:selectionChanged",
       sheet: event.sheet,
+      sheetName: sheetNameAt(event.sheet),
       range: event.range,
       activeCell: event.activeCell,
     });

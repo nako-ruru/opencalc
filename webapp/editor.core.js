@@ -2414,6 +2414,14 @@ function installHostBridge() {
         const cells = Array.isArray(data.cells) ? data.cells : [];
         if (!cells.length) throw new Error("nothing to write");
         if (cells.length > 2000) throw new Error("too many cells");
+        // What the cells held before the write, so the host can keep a history
+        // entry that restores the formulas rather than their values.
+        const before = cells.map((cell) => {
+          try {
+            return wasm.session_cell_input(
+              state.sheet, Number(cell.row) || 0, Number(cell.col) || 0) || "";
+          } catch { return ""; }
+        });
         // One gesture, one undo step: the preview promised a single change,
         // and Ctrl+Z has to take the whole of it back.
         const mark = wasm.session_undo_mark();
@@ -2439,6 +2447,21 @@ function installHostBridge() {
           row: Number(c.row) || 0,
           col: Number(c.col) || 0,
         })));
+        // The host keeps the history; the editor knows what actually changed.
+        // A restore passes `record: false`, or the history would fill with the
+        // restores themselves.
+        if (data.record !== false) {
+          post({
+            type: "opencalc:aiWrite",
+            label: String(data.label || ""),
+            cells: cells.map((c, i) => ({
+              row: Number(c.row) || 0,
+              col: Number(c.col) || 0,
+              before: before[i],
+              after: String(c.value == null ? "" : c.value),
+            })),
+          });
+        }
       } catch (e) {
         result.error = String((e && e.message) || e);
       }
@@ -2873,6 +2896,11 @@ function applyErrorFix() {
   tryEdit(() => wasm.session_set_cell(state.sheet, d.row, d.col, d.fix));
   hideErrorActions();
   showAiHighlight([{ row: d.row, col: d.col }], 8000);
+  errorActionsPost({
+    type: "opencalc:aiWrite",
+    label: "公式修复",
+    cells: [{ row: d.row, col: d.col, before: d.formula, after: d.fix }],
+  });
   draw();
 }
 

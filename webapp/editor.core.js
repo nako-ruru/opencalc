@@ -2351,6 +2351,82 @@ function installHostBridge() {
       post(result);
       return;
     }
+    if (data.type === "opencalc:readRange") {
+      const result = {
+        type: "opencalc:readRangeResult",
+        id: data.id,
+        ok: false,
+        values: [],
+        locked: [],
+        range: null,
+        error: "",
+      };
+      try {
+        const r = expandRange(data.a1);
+        if (!r) throw new Error("bad range: " + data.a1);
+        // A preview is a diff a person reads, not a data export.
+        if ((r.r1 - r.r0 + 1) * (r.c1 - r.c0 + 1) > 2000) {
+          throw new Error("选区太大（超过 2000 个单元格），请只选中要清洗的那块数据");
+        }
+        const cells = JSON.parse(wasm.session_cells(state.sheet, r.r0, r.c0, r.r1, r.c1));
+        const byKey = new Map();
+        for (const c of cells) byKey.set(c.r + "," + c.c, c);
+        const values = [], locked = [];
+        for (let row = r.r0; row <= r.r1; row++) {
+          const vrow = [], lrow = [];
+          for (let col = r.c0; col <= r.c1; col++) {
+            const c = byKey.get(row + "," + col);
+            vrow.push(c ? (c.t || "") : "");
+            let input = "";
+            try { input = wasm.session_cell_input(state.sheet, row, col) || ""; } catch {}
+            lrow.push(input.startsWith("="));
+          }
+          values.push(vrow);
+          locked.push(lrow);
+        }
+        result.ok = true;
+        result.range = r;
+        result.values = values;
+        result.locked = locked;
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
+      return;
+    }
+    if (data.type === "opencalc:writeCells") {
+      const result = { type: "opencalc:writeCellsResult", id: data.id, ok: false, applied: 0, error: "" };
+      try {
+        const cells = Array.isArray(data.cells) ? data.cells : [];
+        if (!cells.length) throw new Error("nothing to write");
+        if (cells.length > 2000) throw new Error("too many cells");
+        // One gesture, one undo step: the preview promised a single change,
+        // and Ctrl+Z has to take the whole of it back.
+        const mark = wasm.session_undo_mark();
+        try {
+          for (const cell of cells) {
+            wasm.session_set_cell(
+              state.sheet,
+              Number(cell.row) || 0,
+              Number(cell.col) || 0,
+              String(cell.value == null ? "" : cell.value),
+            );
+            result.applied++;
+          }
+          wasm.session_group_undo_since(mark);
+        } catch (e) {
+          try { wasm.session_undo(); } catch {}
+          throw e;
+        }
+        invalidateGrowth();
+        draw();
+        result.ok = true;
+      } catch (e) {
+        result.error = String((e && e.message) || e);
+      }
+      post(result);
+      return;
+    }
     if (data.type === "opencalc:addFormat") {
       const result = {
         type: "opencalc:addFormatResult",

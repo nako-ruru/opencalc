@@ -2253,6 +2253,20 @@ function installHostBridge() {
       post({ type: "opencalc:expandRangeResult", id: data.id, range });
       return;
     }
+    if (data.type === "opencalc:errorAnswer") {
+      if (!errorActionsData || data.id !== errorActionsData.req) return;
+      errorActionsBusy = false;
+      if (!data.ok) {
+        errorActionsData.explain = "解释失败：" + (data.error || "未知错误");
+      } else {
+        if (data.explain) errorActionsData.explain = String(data.explain);
+        if (data.fix) errorActionsData.fix = String(data.fix);
+      }
+      buildErrorActions();
+      positionErrorActions();
+      renderErrorBubble();
+      return;
+    }
     if (data.type === "opencalc:pivotFields") {
       const result = { type: "opencalc:pivotFieldsResult", id: data.id, ok: false, fields: [], error: "" };
       try {
@@ -2459,6 +2473,225 @@ function installHostBridge() {
     });
   });
   post({ type: "opencalc:ready", build: BUILD });
+}
+
+// --- Error actions ----------------------------------------------------------
+//
+// An error cell already carries Excel's green corner flag (`XL-UX-016`); what
+// it does not carry is the two things a person wants next: why, and what to
+// type instead. The buttons live here rather than in the host because they
+// have to hug the cell through scrolling and zoom, and only the editor knows
+// where the cell is.
+//
+// They exist only when embedded: the answer comes from the host, which is the
+// only side that has a model.
+let errorActionsEl = null;
+let errorActionsCell = null;
+let errorActionsData = null;
+let errorActionsBusy = false;
+let errorActionsReq = 0;
+
+const ERROR_BTN =
+  "border:1px solid var(--oc-control-border-color);background:var(--oc-surface-color);" +
+  "color:var(--oc-text-color);border-radius:6px;padding:3px 8px;" +
+  "font:12px/1.4 system-ui,sans-serif;cursor:pointer;white-space:nowrap;";
+
+function a1OfCell(row, col) {
+  let n = col + 1, letters = "";
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    letters = String.fromCharCode(65 + m) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters + (row + 1);
+}
+
+/// The formula and error behind a cell, or null when it is not an error.
+function errorAtCell(row, col) {
+  try {
+    const cell = JSON.parse(wasm.session_cells(state.sheet, row, col, row, col))[0];
+    if (!cell || !cell.er) return null;
+    let formula = "";
+    try { formula = wasm.session_cell_input(state.sheet, row, col) || ""; } catch {}
+    return { formula, error: cell.t || "#ERROR!" };
+  } catch { return null; }
+}
+
+function errorActionsHost() {
+  const parent = window.parent;
+  return parent && parent !== window ? parent : null;
+}
+
+function errorActionsPost(message) {
+  const host = errorActionsHost();
+  if (!host) return;
+  try { host.postMessage(message, "*"); } catch {}
+}
+
+function hideErrorActions() {
+  if (errorActionsEl) errorActionsEl.style.display = "none";
+  errorActionsCell = null;
+  errorActionsData = null;
+  errorActionsBusy = false;
+}
+
+function truncateText(text, n) {
+  const s = String(text || "");
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function positionErrorActions() {
+  if (!errorActionsEl || !errorActionsData) return;
+  const rect = rangeRect(errorActionsData.a1);
+  if (!rect) { errorActionsEl.style.display = "none"; return; }
+  errorActionsEl.style.display = "block";
+  const width = errorActionsEl.offsetWidth || 340;
+  const height = errorActionsEl.offsetHeight || 40;
+  const left = Math.max(6, Math.min(rect.x, window.innerWidth - width - 6));
+  let top = rect.y + rect.h + 6;
+  if (top + height > window.innerHeight - 6) top = Math.max(6, rect.y - height - 6);
+  errorActionsEl.style.left = left + "px";
+  errorActionsEl.style.top = top + "px";
+}
+
+function renderErrorBubble() {
+  if (!errorActionsEl || !errorActionsData) return;
+  const bubble = errorActionsEl.querySelector(".oc-error-bubble");
+  if (!bubble) return;
+  bubble.textContent = "";
+  const d = errorActionsData;
+  if (errorActionsBusy) {
+    bubble.style.display = "block";
+    const wait = document.createElement("div");
+    wait.style.cssText = "color:var(--oc-muted-text-color);";
+    wait.textContent = "正在分析…";
+    bubble.appendChild(wait);
+    return;
+  }
+  if (!d.explain && !d.fix) { bubble.style.display = "none"; return; }
+  bubble.style.display = "block";
+  if (d.explain) {
+    const text = document.createElement("div");
+    text.style.cssText = "white-space:pre-wrap;margin-bottom:8px;";
+    text.textContent = d.explain;
+    bubble.appendChild(text);
+  }
+  if (d.fix) {
+    const fix = document.createElement("div");
+    fix.style.cssText =
+      "font-family:var(--oc-mono,monospace);font-size:12px;background:var(--oc-surface-color);" +
+      "border:1px solid var(--oc-border-color);border-radius:6px;padding:6px 8px;margin-bottom:8px;word-break:break-all;";
+    fix.textContent = d.fix;
+    bubble.appendChild(fix);
+  }
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:6px;justify-content:flex-end;";
+  if (d.fix) {
+    const apply = document.createElement("button");
+    apply.textContent = "应用";
+    apply.style.cssText = ERROR_BTN +
+      "background:var(--oc-accent-color);color:#fff;border-color:var(--oc-accent-color);";
+    apply.addEventListener("click", applyErrorFix);
+    actions.appendChild(apply);
+  }
+  const close = document.createElement("button");
+  close.textContent = "关闭";
+  close.style.cssText = ERROR_BTN;
+  close.addEventListener("click", hideErrorActions);
+  actions.appendChild(close);
+  bubble.appendChild(actions);
+}
+
+function buildErrorActions() {
+  if (!errorActionsEl) {
+    errorActionsEl = document.createElement("div");
+    errorActionsEl.id = "oc-error-actions";
+    errorActionsEl.style.cssText =
+      "position:fixed;z-index:80;display:none;width:340px;font:12px/1.4 system-ui,sans-serif;";
+    document.body.appendChild(errorActionsEl);
+  }
+  errorActionsEl.textContent = "";
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;gap:6px;justify-content:flex-start;";
+
+  const explain = document.createElement("button");
+  explain.textContent = "解释原因";
+  explain.style.cssText = ERROR_BTN;
+  explain.addEventListener("click", () => askError("explain"));
+
+  const fix = document.createElement("button");
+  fix.textContent = errorActionsData && errorActionsData.fix
+    ? "建议修改为 " + truncateText(errorActionsData.fix, 24)
+    : "建议修改为 …";
+  fix.style.cssText = ERROR_BTN;
+  fix.addEventListener("click", () => {
+    if (errorActionsData && errorActionsData.fix) applyErrorFix();
+    else askError("fix");
+  });
+
+  bar.appendChild(explain);
+  bar.appendChild(fix);
+
+  const bubble = document.createElement("div");
+  bubble.className = "oc-error-bubble";
+  bubble.style.cssText =
+    "display:none;margin-top:6px;background:var(--oc-popover-background-color);" +
+    "border:1px solid var(--oc-control-border-color);border-radius:8px;" +
+    "box-shadow:0 8px 24px rgba(20,30,50,.18);padding:10px;max-height:260px;overflow:auto;";
+
+  errorActionsEl.appendChild(bar);
+  errorActionsEl.appendChild(bubble);
+  renderErrorBubble();
+}
+
+function askError(mode) {
+  if (!errorActionsData || errorActionsBusy) return;
+  errorActionsBusy = true;
+  const id = ++errorActionsReq;
+  errorActionsData.req = id;
+  renderErrorBubble();
+  positionErrorActions();
+  errorActionsPost({
+    type: "opencalc:errorAsk",
+    id,
+    mode,
+    a1: errorActionsData.a1,
+    formula: errorActionsData.formula,
+    error: errorActionsData.error,
+  });
+}
+
+function applyErrorFix() {
+  const d = errorActionsData;
+  if (!d || !d.fix) return;
+  tryEdit(() => wasm.session_set_cell(state.sheet, d.row, d.col, d.fix));
+  hideErrorActions();
+  draw();
+}
+
+/// Called from `draw()`: show the buttons on an error cell, follow it while it
+/// moves, and take them away when the selection is not an error.
+function updateErrorActions() {
+  if (!errorActionsHost() || !wasm) { hideErrorActions(); return; }
+  if (state.editing || state.selKind !== "cells") { hideErrorActions(); return; }
+  const row = state.sel.row, col = state.sel.col;
+  const err = errorAtCell(row, col);
+  if (!err) { hideErrorActions(); return; }
+  if (!errorActionsCell || errorActionsCell.row !== row || errorActionsCell.col !== col) {
+    errorActionsCell = { row, col };
+    errorActionsData = {
+      row, col,
+      a1: a1OfCell(row, col),
+      formula: err.formula,
+      error: err.error,
+      explain: "",
+      fix: "",
+      req: 0,
+    };
+    errorActionsBusy = false;
+    buildErrorActions();
+  }
+  positionErrorActions();
 }
 // The merge covering (row,col), if any.
 // Whether a merge intersects the current (effective) selection.
@@ -4160,6 +4393,9 @@ export function draw() {
   // than the one it started from.
   if (wasm) emitStateEvents();
   if (wasm) { try { customFunctionsTick(); } catch {} }
+  // The error buttons follow the cell they belong to through scroll and zoom,
+  // so they are positioned from the frame that was just painted.
+  if (wasm) { try { updateErrorActions(); } catch {} }
 }
 
 // px proximity to the freeze divider that arms a drag.

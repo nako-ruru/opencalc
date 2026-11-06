@@ -2421,6 +2421,10 @@ function installHostBridge() {
         invalidateGrowth();
         draw();
         result.ok = true;
+        showAiHighlight(cells.map((c) => ({
+          row: Number(c.row) || 0,
+          col: Number(c.col) || 0,
+        })));
       } catch (e) {
         result.error = String((e && e.message) || e);
       }
@@ -2549,6 +2553,117 @@ function installHostBridge() {
     });
   });
   post({ type: "opencalc:ready", build: BUILD });
+}
+
+// --- AI change highlight ----------------------------------------------------
+//
+// A write that lands silently is indistinguishable from one that did nothing:
+// the cells change, but the user was looking at the chat. These cells get a
+// translucent green wash and a border for a few seconds, plus one chip anchored
+// to the first of them with the two things worth doing next — undo, or dismiss.
+//
+// The chip lives here rather than in the host for the same reason the error
+// buttons do: it has to follow the cells through scroll and zoom.
+let aiHighlight = null;
+let aiHighlightTimer = null;
+let aiChipEl = null;
+
+function clearAiHighlight() {
+  aiHighlight = null;
+  clearTimeout(aiHighlightTimer);
+  aiHighlightTimer = null;
+  if (aiChipEl) aiChipEl.style.display = "none";
+}
+
+function showAiHighlight(cells, ms = 12000) {
+  if (!Array.isArray(cells) || !cells.length) return;
+  clearTimeout(aiHighlightTimer);
+  aiHighlight = { cells: cells.slice(0, 500) };
+  buildAiChip(cells.length);
+  draw();
+  aiHighlightTimer = setTimeout(() => {
+    clearAiHighlight();
+    draw();
+  }, ms);
+}
+
+function buildAiChip(count) {
+  if (!aiChipEl) {
+    aiChipEl = document.createElement("div");
+    aiChipEl.id = "oc-ai-chip";
+    aiChipEl.style.cssText =
+      "position:fixed;z-index:70;display:none;align-items:center;gap:8px;" +
+      "background:var(--oc-popover-background-color);border:1px solid #10b981;" +
+      "border-radius:999px;padding:4px 8px 4px 10px;font:12px/1.4 system-ui,sans-serif;" +
+      "box-shadow:0 6px 18px rgba(16,185,129,.25);";
+
+    const label = document.createElement("span");
+    label.className = "oc-ai-chip-label";
+    label.style.cssText = "color:var(--oc-text-color);";
+
+    const undo = document.createElement("button");
+    undo.textContent = "撤销";
+    undo.style.cssText =
+      "border:0;background:#10b981;color:#fff;border-radius:999px;" +
+      "padding:2px 8px;font:12px/1.4 system-ui,sans-serif;cursor:pointer;";
+    undo.addEventListener("click", () => {
+      try { wasm.session_undo(); } catch {}
+      clearAiHighlight();
+      draw();
+    });
+
+    const close = document.createElement("button");
+    close.textContent = "×";
+    close.style.cssText =
+      "border:0;background:transparent;color:var(--oc-muted-text-color);" +
+      "font-size:14px;cursor:pointer;padding:0 2px;";
+    close.addEventListener("click", () => {
+      clearAiHighlight();
+      draw();
+    });
+
+    aiChipEl.appendChild(label);
+    aiChipEl.appendChild(undo);
+    aiChipEl.appendChild(close);
+    document.body.appendChild(aiChipEl);
+  }
+  const label = aiChipEl.querySelector(".oc-ai-chip-label");
+  if (label) label.textContent = "AI 修改了 " + count + " 处";
+  aiChipEl.style.display = "inline-flex";
+}
+
+function positionAiChip() {
+  if (!aiChipEl || !aiHighlight) return;
+  const first = aiHighlight.cells[0];
+  const rect = rangeRect(a1OfCell(first.row, first.col));
+  if (!rect) { aiChipEl.style.display = "none"; return; }
+  aiChipEl.style.display = "inline-flex";
+  const w = aiChipEl.offsetWidth || 160;
+  const h = aiChipEl.offsetHeight || 28;
+  const left = Math.max(6, Math.min(rect.x, window.innerWidth - w - 6));
+  // Below by default: above a top-row cell is the column header, and a chip
+  // covering the header hides the one thing that says where you are.
+  let top = rect.y + rect.h + 6;
+  if (top + h > window.innerHeight - 6) top = Math.max(6, rect.y - h - 6);
+  aiChipEl.style.left = left + "px";
+  aiChipEl.style.top = top + "px";
+}
+
+/// The wash itself, painted over the cells so the text underneath stays legible.
+function drawAiHighlight() {
+  if (!aiHighlight) return;
+  for (const cell of aiHighlight.cells) {
+    const x = colXAt(cell.col), y = rowYAt(cell.row);
+    if (x === undefined || y === undefined) continue;
+    const w = colWAt(cell.col), h = rowHAt(cell.row);
+    ctx.save();
+    ctx.fillStyle = "rgba(16,185,129,0.18)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#10b981";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.restore();
+  }
 }
 
 // --- Error actions ----------------------------------------------------------
@@ -2742,6 +2857,7 @@ function applyErrorFix() {
   if (!d || !d.fix) return;
   tryEdit(() => wasm.session_set_cell(state.sheet, d.row, d.col, d.fix));
   hideErrorActions();
+  showAiHighlight([{ row: d.row, col: d.col }], 8000);
   draw();
 }
 
@@ -4469,8 +4585,10 @@ export function draw() {
   // than the one it started from.
   if (wasm) emitStateEvents();
   if (wasm) { try { customFunctionsTick(); } catch {} }
-  // The error buttons follow the cell they belong to through scroll and zoom,
-  // so they are positioned from the frame that was just painted.
+  // Both follow cells through scroll and zoom, so they are positioned from the
+  // frame that was just painted.
+  if (wasm) { try { drawAiHighlight(); } catch {} }
+  if (wasm) { try { positionAiChip(); } catch {} }
   if (wasm) { try { updateErrorActions(); } catch {} }
 }
 
